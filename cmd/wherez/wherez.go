@@ -6,7 +6,7 @@ import (
 	"log"
 	"strconv"
 
-	"github.com/nictuku/wherez"
+	"github.com/inercia/wherez/discover"
 )
 
 // port for the wherez protocol (UDP+TCP).
@@ -22,8 +22,11 @@ func main() {
 		log.Fatalf("Invalid port parameter: %v", err)
 	}
 	passphrase := flag.Arg(1)
-	c := wherez.FindAuthenticatedPeers(port, appPort, 1, []byte(passphrase))
-	for p := range c {
+
+	var dis *discover.Discoverer
+	dis , err = discover.NewDiscoverer(port, appPort, []byte(passphrase))
+	dis.FindPeers(1)
+	for p := range dis.DiscoveredPeers {
 		// Peer found!
 		fmt.Println("peer found:", p.String())
 	}

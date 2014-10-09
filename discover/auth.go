@@ -1,4 +1,4 @@
-package wherez
+package discover
 
 import (
 	"bytes"
