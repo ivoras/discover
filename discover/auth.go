@@ -15,8 +15,10 @@ import (
 var (
 	// Identifies wherez TCP messages.
 	magicHeader = []byte("wherez")
+
 	// dedupe is needed to ignore connections from self.
 	dedupe []byte
+
 	// If true, connections to self are allowed - used for testing.
 	allowSelfConnection = false
 )
@@ -25,6 +27,14 @@ const (
 	messageLen = 20
 	dedupeLen  = 10
 )
+
+///////////////////////////////////////////////////////////////////////////
+
+func randMsg() ([]byte, error) {
+	b := make([]byte, 20)
+	_, err := rand.Read(b)
+	return b, err
+}
 
 func init() {
 	var err error
@@ -63,95 +73,77 @@ type Challenge struct {
 	Challenge   [20]byte
 }
 
-func newChallenge() (m Challenge, err error) {
-	//m = Challenge{}
-	copy(m.MagicHeader[:], magicHeader[:])
-	copy(m.Dedupe[:], dedupe[:])
-	challenge, err := randMsg()
-	if err != nil {
-		return
-	}
-	copy(m.Challenge[:], challenge[:])
-	return
-}
-
-func checkPeer(addr string, passphrase []byte, c chan Peer) {
-	if peer, err := verifyPeer(addr, passphrase); err == nil {
-		c <- peer
-	}
-
-}
-
-// verifyPeer connects to a host:port address specified in peer and sends it a
-// cryptographic challenge. If the peer responds with a valid MAC that appears
-// to have been generated with the shared secret in passphrase, consider it a
-// valid Peer and returns the details. If the connection fails or the peer
-// authentication fails, returns an error.
-func verifyPeer(peer string, passphrase []byte) (p Peer, err error) {
-	conn, err := net.Dial("tcp", peer)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	var challenge Challenge
-	challenge, err = newChallenge()
-	if err != nil {
-		// log.Printf("auth newChallenge error %v", err)
-		return
-	}
-	if err = binary.Write(conn, binary.LittleEndian, challenge); err != nil {
-		// The other side is either unreachable or we connected to
-		// ourselves and closed the connection.
-		return
-	}
-	in := new(Response)
-	if err = binary.Read(conn, binary.LittleEndian, in); err != nil {
-		// log.Println("auth could not read response from conn:", err)
-		return
-	}
-	if !checkMAC(challenge.Challenge[:], in.MAC[:], passphrase) {
-		return p, fmt.Errorf("Invalid challenge response")
-	}
-	host, _, err := net.SplitHostPort(peer)
-	if err != nil {
-		return
-	}
-	return Peer{Addr: fmt.Sprintf("%v:%v", host, in.Port)}, nil
-}
-
-func randMsg() ([]byte, error) {
-	b := make([]byte, 20)
-	_, err := rand.Read(b)
-	return b, err
-}
-
-func listenAuth(port, appPort int, passphrase []byte) (net.Addr, error) {
-	ln, err := net.ListenTCP("tcp", &net.TCPAddr{Port: port})
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				log.Println("listenAuth accept error. Stopping listener.", err)
-				return
-			}
-			go handleConn(conn, appPort, passphrase)
-		}
-	}()
-	return ln.Addr(), nil
-}
-
 // Response containing proof that the server (Bob) knows the shared secret and
 // the application port information required by the client.
 type Response struct {
 	Port uint16
-	// MAC of the Challenge sent by the client (Alice).
-	MAC [32]byte
+	MAC  [32]byte // MAC of the Challenge sent by the client (Alice).
 }
 
-func handleConn(conn io.ReadWriteCloser, appPort int, passphrase []byte) {
+type AuthListener func(address string) (net.Listener, error)
+type AuthDialer func(address string) (net.Conn, error)
+
+type AuthResolver struct {
+	Port       int
+	AppPort    int
+	Passphrase []byte
+
+	listenerFactory AuthListener
+	dialerFactory   AuthDialer
+}
+
+func NewAuthResolver(appPort int, passphrase []byte,
+	listener AuthListener, dialer AuthDialer) *AuthResolver {
+	return &AuthResolver{
+		AppPort:         appPort,
+		Passphrase:      passphrase,
+		listenerFactory: listener,
+		dialerFactory:   dialer}
+}
+
+// create a new authentication resolution service
+func NewAuthResolverTCP(port, appPort int, passphrase []byte) *AuthResolver {
+
+	// create two TCP factories, for listeners and for dialers
+	tcpListener := func(address string) (net.Listener, error) {
+		log.Printf("Creating TCP listener to %s...", address)
+		return net.Listen("tcp", address)
+	}
+	tcpDialer := func(address string) (net.Conn, error) {
+		log.Printf("Creating TCP connection to %s...", address)
+		return net.Dial("tcp", address)
+	}
+
+	return &AuthResolver{port, appPort, passphrase, tcpListener, tcpDialer}
+}
+
+/////////////////////////////////////////
+// incoming connections
+/////////////////////////////////////////
+
+// start listening at the port specified, waiting for peers that want to
+// connect to us...
+func (a *AuthResolver) ListenAndServe() (net.Addr, error) {
+	listener, err := a.listenerFactory(fmt.Sprintf(":%d", a.Port))
+	if err != nil {
+		log.Fatalf("Could not create listener: %v", err)
+	}
+
+	go func() {
+		for {
+			conn, aErr := listener.Accept()
+			if err != nil {
+				log.Println("accept error. Stopping listener.", aErr)
+				return
+			}
+			go a.handleConn(conn, a.AppPort, a.Passphrase)
+		}
+	}()
+
+	return listener.Addr(), nil
+}
+
+func (a *AuthResolver) handleConn(conn io.ReadWriteCloser, appPort int, passphrase []byte) {
 	// Everything is done with one packet in and one packet out, so close
 	// the connection after this function ends.
 	defer conn.Close()
@@ -162,6 +154,7 @@ func handleConn(conn io.ReadWriteCloser, appPort int, passphrase []byte) {
 	if err != nil {
 		return
 	}
+
 	// Verify if the magic header is correct. Several DHT nodes will connect
 	// to whatever peer they believe exist, most likely to scrape their
 	// content. But we're not BitTorrent clients, so we just close the
@@ -197,7 +190,66 @@ func handleConn(conn io.ReadWriteCloser, appPort int, passphrase []byte) {
 	}
 }
 
-func checkMAC(message, messageMAC, key []byte) bool {
+/////////////////////////////////////////
+// outgoing connections
+/////////////////////////////////////////
+
+// Verify connects to a host:port address specified in peer and sends it a
+// cryptographic challenge. If the peer responds with a valid MAC that appears
+// to have been generated with the shared secret in passphrase, consider it a
+// valid Peer and returns the details. If the connection fails or the peer
+// authentication fails, returns an error.
+func (a *AuthResolver) Verify(addr string, c chan Peer) error {
+	conn, err := a.dialerFactory(addr)
+	if err != nil {
+		return fmt.Errorf("could not create connection to %s: %v", addr, err)
+	}
+	defer conn.Close()
+
+	var challenge Challenge
+	challenge, err = a.newChallenge()
+	if err != nil {
+		return fmt.Errorf("auth newChallenge error %v", err)
+	}
+
+	if err = binary.Write(conn, binary.LittleEndian, challenge); err != nil {
+		// The other side is either unreachable or we connected to
+		// ourselves and closed the connection.
+		return nil
+	}
+
+	in := new(Response)
+	if err = binary.Read(conn, binary.LittleEndian, in); err != nil {
+		return fmt.Errorf("auth could not read response from conn:", err)
+	}
+
+	if !a.checkMAC(challenge.Challenge[:], in.MAC[:], a.Passphrase) {
+		return fmt.Errorf("Invalid challenge response")
+	}
+
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("could not parse address %s: %v", addr, err)
+	}
+
+	peer := Peer{Addr: fmt.Sprintf("%v:%v", host, in.Port)}
+	c <- peer
+	return nil
+}
+
+func (a *AuthResolver) newChallenge() (m Challenge, err error) {
+	//m = Challenge{}
+	copy(m.MagicHeader[:], magicHeader[:])
+	copy(m.Dedupe[:], dedupe[:])
+	challenge, err := randMsg()
+	if err != nil {
+		return
+	}
+	copy(m.Challenge[:], challenge[:])
+	return
+}
+
+func (a *AuthResolver) checkMAC(message, messageMAC, key []byte) bool {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(message)
 	expectedMAC := mac.Sum(nil)

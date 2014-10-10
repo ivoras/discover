@@ -24,23 +24,28 @@ func addrLocal(addr net.Addr) string {
 func TestAuth(t *testing.T) {
 	// Ignore the dedupe ID check.
 	allowSelfConnection = true
+
 	passphrase := []byte("secret")
 	want := "localhost:3000"
 
+	res := NewAuthResolverTCP(60000, 31337, passphrase)
+
 	// Starts server in the background.
-	addr, err := listenAuth(0, 3000, passphrase)
+	addr, err := res.ListenAndServe()
 	if err != nil {
 		t.Fatalf("listenAuth error %v", err)
 	}
 
 	// Client.
-	peer, err := verifyPeer(addrLocal(addr), passphrase)
+	peer, err := res.Verify(addrLocal(addr))
 	if err != nil {
 		t.Errorf("auth: %v", err)
 	}
+
 	if peer.String() != want {
 		t.Errorf("Wanted peer %v, got %v", want, peer.String())
 	}
+
 	allowSelfConnection = false
 }
 

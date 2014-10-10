@@ -26,6 +26,8 @@ import (
 
 const DEFAULT_DHT_NODE = "213.239.195.138:40000"
 
+/////////////////////////////////////////////////////////////////////////
+
 type Peer struct {
 	Addr string
 }
@@ -55,72 +57,15 @@ type Discoverer struct {
 	passphrase      []byte
 	DiscoveredPeers chan Peer
 	ih              dht.InfoHash
+
+	*AuthResolver
 }
 
 // create a new servie
 func NewDiscoverer(port int, appPort int, passphrase []byte) (*Discoverer, error) {
-	ih, err := infoHash(passphrase)
-	if err != nil {
-		return nil, fmt.Errorf("Could not calculate infohash for the provided passphrase: %v", err)
-	}
+	// infohash used for this wherez lookup. This should be somewhat hard to guess
+	// but it's not exactly a secret.
 
-	d := &Discoverer{
-		port:            port,
-		appPort:         appPort,
-		passphrase:      passphrase,
-		DiscoveredPeers: make(chan Peer),
-		ih:              ih,
-	}
-
-	return d, nil
-}
-
-func (this *Discoverer) FindPeers(minPeers int) {
-	defer close(this.DiscoveredPeers)
-
-	announce := false
-	if this.appPort > 0 {
-		announce = true
-		if _, err := listenAuth(this.port, this.appPort, this.passphrase); err != nil {
-			log.Println("Could not open listener:", err)
-			return
-		}
-	}
-
-	// Connect to the DHT network
-	dhtService, err := dht.NewDHTNode(this.port, minPeers, announce)
-	if err != nil {
-		log.Println("Could not create the DHT node:", err)
-		return
-	}
-	dhtService.AddNode(DEFAULT_DHT_NODE)
-
-	go dhtService.DoDHT()
-	go this.obtainPeers(dhtService) // sends authenticated peers to channel c.
-
-	for {
-		// Keeps requesting for the infohash. This is a no-op if the
-		// DHT is satisfied with the number of peers it has found.
-		dhtService.PeersRequest(string(this.ih), true)
-		time.Sleep(5 * time.Second)
-	}
-}
-
-func (this *Discoverer) obtainPeers(d *dht.DHT) {
-	for r := range d.PeersRequestResults {
-		for _, peers := range r {
-			for _, x := range peers {
-				// A DHT peer for our infohash was found. It
-				// needs to be authenticated.
-				checkPeer(dht.DecodePeerAddress(x), this.passphrase, this.DiscoveredPeers)
-			}
-		}
-	}
-}
-
-// infohash used for this wherez lookup. This should be somewhat hard to guess
-// but it's not exactly a secret.
-func infoHash(passphrase []byte) (dht.InfoHash, error) {
 	// SHA256 of the passphrase.
 	h256 := sha256.New()
 	h256.Write(passphrase)
@@ -135,5 +80,60 @@ func infoHash(passphrase []byte) (dht.InfoHash, error) {
 	h160 := sha1.New()
 	h160.Write(h2)
 	h3 := h160.Sum(nil)
-	return dht.InfoHash(h3[:]), nil
+	ih := dht.InfoHash(h3[:])
+
+	d := &Discoverer{
+		port:            port,
+		appPort:         appPort,
+		passphrase:      passphrase,
+		DiscoveredPeers: make(chan Peer),
+		ih:              ih,
+		AuthResolver:    NewAuthResolverTCP(port, appPort, passphrase),
+	}
+
+	return d, nil
+}
+
+// find authenticated peers
+func (this *Discoverer) FindPeers(minPeers int) {
+	defer close(this.DiscoveredPeers)
+
+	announce := false
+	if this.appPort > 0 {
+		announce = true
+		if _, err := this.ListenAndServe(); err != nil {
+			log.Println("Could not open listener:", err)
+			return
+		}
+	}
+
+	// Connect to the DHT network
+	dhtService, err := dht.NewDHTNode(this.port, minPeers, announce)
+	if err != nil {
+		log.Println("Could not create the DHT node:", err)
+		return
+	}
+	dhtService.AddNode(DEFAULT_DHT_NODE)
+
+	go dhtService.DoDHT()
+
+	// obtins peers (that can authenticate) from the DHT network
+	go func(d *dht.DHT) {
+		for r := range d.PeersRequestResults {
+			for _, peers := range r {
+				for _, x := range peers {
+					// A DHT peer for our infohash was found. It
+					// needs to be authenticated.
+					this.Verify(dht.DecodePeerAddress(x), this.DiscoveredPeers)
+				}
+			}
+		}
+	}(dhtService) // sends authenticated peers to channel c.
+
+	for {
+		// Keeps requesting for the infohash. This is a no-op if the
+		// DHT is satisfied with the number of peers it has found.
+		dhtService.PeersRequest(string(this.ih), true)
+		time.Sleep(5 * time.Second)
+	}
 }
