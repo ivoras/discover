@@ -11,6 +11,11 @@ It authenticates sibling peers using an HMAC-based mechanism.
 
 This code is based on Wherez (https://github.com/nictuku/wherez)
 
+Documentation
+-------------
+
+Documentation can be found in [GoDoc][GoDoc]
+
 Possible usages
 ---------------
 
@@ -41,3 +46,6 @@ How does it work?
 ------------------
 
 Presentation: http://goo.gl/vn7Pvh
+
+
+[GoDoc]: http://godoc.org/github.com/inercia/discover

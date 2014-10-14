@@ -19,6 +19,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/nictuku/dht"
@@ -58,7 +60,8 @@ type Discoverer struct {
 	DiscoveredPeers chan Peer
 	ih              dht.InfoHash
 
-	*AuthResolver
+	*AuthClient
+	*AuthServer
 }
 
 // create a new servie
@@ -82,13 +85,26 @@ func NewDiscoverer(port int, appPort int, passphrase []byte) (*Discoverer, error
 	h3 := h160.Sum(nil)
 	ih := dht.InfoHash(h3[:])
 
+	listenAddress := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+
+	authServer, sErr := NewAuthServer(listenAddress, appPort, passphrase)
+	if sErr != nil {
+		return nil, sErr
+	}
+	authClient, cErr := NewAuthClient(appPort, passphrase)
+	if cErr != nil {
+		return nil, cErr
+	}
+
 	d := &Discoverer{
 		port:            port,
 		appPort:         appPort,
 		passphrase:      passphrase,
 		DiscoveredPeers: make(chan Peer),
 		ih:              ih,
-		AuthResolver:    NewAuthResolverTCP(port, appPort, passphrase),
+
+		AuthServer: authServer,
+		AuthClient: authClient,
 	}
 
 	return d, nil
@@ -101,30 +117,46 @@ func (this *Discoverer) FindPeers(minPeers int) {
 	announce := false
 	if this.appPort > 0 {
 		announce = true
-		if _, err := this.ListenAndServe(); err != nil {
-			log.Println("Could not open listener:", err)
+		if err := this.ListenAndServe(); err != nil {
+			log.Fatalf("Could not open listener:", err)
 			return
 		}
 	}
 
 	// Connect to the DHT network
+	log.Println("Connecting to DHT network...")
 	dhtService, err := dht.NewDHTNode(this.port, minPeers, announce)
 	if err != nil {
 		log.Println("Could not create the DHT node:", err)
 		return
 	}
+
+	log.Printf("Adding DHT node %s...", DEFAULT_DHT_NODE)
 	dhtService.AddNode(DEFAULT_DHT_NODE)
 
 	go dhtService.DoDHT()
 
 	// obtins peers (that can authenticate) from the DHT network
 	go func(d *dht.DHT) {
+		log.Printf("Waiting for possible peers...")
 		for r := range d.PeersRequestResults {
 			for _, peers := range r {
 				for _, x := range peers {
 					// A DHT peer for our infohash was found. It
 					// needs to be authenticated.
-					this.Verify(dht.DecodePeerAddress(x), this.DiscoveredPeers)
+					address := dht.DecodePeerAddress(x)
+					log.Printf("Discovered possible peer %s", address)
+					if response, err := this.Verify(address); err != nil || response == nil {
+						log.Printf("Verification error: %s", err.Error())
+					} else {
+						host, _, err := net.SplitHostPort(address)
+						if err != nil {
+							log.Printf("could not parse address %s: %v", address, err)
+						} else {
+							peer := Peer{Addr: fmt.Sprintf("%v:%v", host, response.Port)}
+							this.DiscoveredPeers <- peer
+						}
+					}
 				}
 			}
 		}
