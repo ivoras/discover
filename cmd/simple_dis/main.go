@@ -9,7 +9,7 @@ import (
 	"strconv"
 
 	"github.com/ccding/go-stun/stun"
-	"github.com/inercia/discover/discover"
+	"github.com/ivoras/discover"
 )
 
 var ERR_COULD_NOT_OBTAIN = fmt.Errorf("Could not obtain a valid IP/port")
@@ -44,8 +44,7 @@ func main() {
 
 	log.Printf("Using STUN for getting external IP from %s:%d...",
 		STUN_SERVICE_ADDR, STUN_SERVICE_PORT)
-	stun.SetServerHost(STUN_SERVICE_ADDR, STUN_SERVICE_PORT)
-	_, stunHost, err = stun.Discover()
+	_, stunHost, err = stun.NewClient().Discover()
 	if err != nil {
 		log.Fatalf("Could not obtain IP:port with STUN")
 	}
@@ -53,7 +52,7 @@ func main() {
 		log.Fatalf("Could not obtain IP:port with STUN")
 	}
 
-	host, port := stunHost.Ip(), int(stunHost.Port())
+	host, port := stunHost.IP(), int(stunHost.Port())
 	log.Printf("External IP/port: %s:%d...", host, port)
 
 	if dis, err := discover.NewDiscoverer(port, appPort, []byte(passphrase)); err != nil {
