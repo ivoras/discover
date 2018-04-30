@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"gopkgs.com/pool.v1"
+	"github.com/oxtoacart/bpool"
 	"log"
 	"net"
 )
@@ -24,15 +24,14 @@ type AuthServer struct {
 	tcpListener net.Listener
 	udpListener *net.UDPConn
 
-	udpPool *pool.Pool // a pool of buffers for reqding UDP requests
+	udpPool *bpool.BytePool // a pool of buffers for reqding UDP requests
 	// see also github.com/oxtoacart/bpool
 }
 
 // creates a new authentication server/client
 func NewAuthServer(address string, appPort int, passphrase []byte) (*AuthServer, error) {
 	// create a pool of buffers that we will use for reading from UDP
-	pool := pool.New(LEN_UDP_POOLS)
-	pool.New = func() interface{} { return make([]byte, LEN_UDP_BUF) }
+	pool := bpool.NewBytePool(LEN_UDP_POOLS, LEN_UDP_BUF)
 
 	return &AuthServer{
 		AppPort:    appPort,
@@ -124,7 +123,7 @@ func (a *AuthServer) listenAndServeUDP() error {
 				for {
 					log.Printf("Reading from UDP socket...")
 					buf := a.udpPool.Get()
-					n, addr, uErr := listener.ReadFromUDP(buf.([]byte))
+					n, addr, uErr := listener.ReadFromUDP(buf)
 					log.Printf("READ: %d", n)
 					// TODO: control return values
 					if uErr != nil {
@@ -148,11 +147,10 @@ func (a *AuthServer) listenAndServeUDP() error {
 }
 
 // Handle an UDP client
-func (a *AuthServer) handleUDPClient(addr *net.UDPAddr, bufPool interface{}) {
+func (a *AuthServer) handleUDPClient(addr *net.UDPAddr, bufPool []byte) {
 	defer a.udpPool.Put(bufPool)
 
-	bufPoolBytes := bufPool.([]byte)
-	buf := bytes.NewBuffer(bufPoolBytes)
+	buf := bytes.NewBuffer(bufPool)
 
 	// Parse the incoming packet.
 	challenge := new(Challenge)

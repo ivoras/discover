@@ -114,9 +114,7 @@ func NewDiscoverer(port int, appPort int, passphrase []byte) (*Discoverer, error
 func (this *Discoverer) FindPeers(minPeers int) {
 	defer close(this.DiscoveredPeers)
 
-	announce := false
 	if this.appPort > 0 {
-		announce = true
 		if err := this.ListenAndServe(); err != nil {
 			log.Fatalf("Could not open listener:", err)
 			return
@@ -125,7 +123,10 @@ func (this *Discoverer) FindPeers(minPeers int) {
 
 	// Connect to the DHT network
 	log.Println("Connecting to DHT network...")
-	dhtService, err := dht.NewDHTNode(this.port, minPeers, announce)
+	dhtService, err := dht.New(
+		&dht.Config{
+			Port: this.port,
+		})
 	if err != nil {
 		log.Println("Could not create the DHT node:", err)
 		return
@@ -134,7 +135,7 @@ func (this *Discoverer) FindPeers(minPeers int) {
 	log.Printf("Adding DHT node %s...", DEFAULT_DHT_NODE)
 	dhtService.AddNode(DEFAULT_DHT_NODE)
 
-	go dhtService.DoDHT()
+	dhtService.Start()
 
 	// obtins peers (that can authenticate) from the DHT network
 	go func(d *dht.DHT) {
